@@ -7,7 +7,7 @@ USE AT YOUR OWN RISK
 ## run
 start `motion-detection.exe`, be sure to configure it first (see below). Start via `cmd.exe` for log output.
 
-webpage is by default located at [http://localhost:8080]
+webpage is by default located at (http://localhost:8080)
 
 ## config
 requires a config.yaml file next to the .exe with contents like:
