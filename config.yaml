@@ -1,0 +1,43 @@
+cameras:
+- name: cam_1
+  description: Camera 1
+  host: '192.168.2.3'
+  port: '8080'
+  path: 'mjpg/video.mjpg'
+  user: ''
+  password: ''
+- name: cam_2
+  description: Camera 2
+  host: '192.168.1.50'
+  port: '80'
+  path: 'mjpg/video.mjpg'
+  user: ''
+  password: ''
+detection:
+  min_area: 10
+  update_reference_seconds: 3
+  notify_seconds: 300
+  frame_skip: 5
+email:
+  enabled: False
+  smtp:
+    server: ''
+    port: 587
+    user: ''
+    password: ''
+  subject: 'no motion on camera %CAMERA%'
+  body: |
+    no motion detected on camera %CAMERA%
+
+    please verify!
+  from_address: ''
+  to_address: ''
+local_display:
+  show_camera_feed: False
+  show_threshold: False
+  show_frame_delta: False
+
+server:
+  listen_address: '0.0.0.0'
+  port: 8080
+  frame_interval_seconds: 0.1
