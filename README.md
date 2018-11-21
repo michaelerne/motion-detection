@@ -13,6 +13,13 @@ webpage is by default located at (http://localhost:8080)
 requires a config.yaml file next to the .exe with contents like:
 
 ```yaml
+log:
+  frames_recieved: False
+  already_notified: True
+  notify: True
+  motion_changes: True
+  log_to_file: True
+  mail: True
 cameras:
 - name: cam_1
   description: Camera 1
