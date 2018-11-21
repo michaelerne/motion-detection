@@ -1,16 +1,16 @@
-
 import cv2
 import imutils
 import datetime
 import yaml
 from flask import Flask, Response
 
-from threading import Thread
+from threading import Thread, Lock
 import time
 
 app = Flask(__name__)
 
 cameras = {}
+config = {}
 
 with open("config.yaml", 'r') as config_file:
     try:
@@ -20,8 +20,33 @@ with open("config.yaml", 'r') as config_file:
         exit(1)
 
 
+def synchronized(func):
+    func.__lock__ = Lock()
+
+    def synced_func(*args, **kws):
+        with func.__lock__:
+            return func(*args, **kws)
+
+    return synced_func
+
+
+logfile = open('motion-detection.log', 'a')
+
+
+@synchronized
+def log(message):
+    if config['log']['log_to_file']:
+        logfile.write("{}: {}\n".format(datetime.datetime.now(), message))
+    print("{}: {}".format(datetime.datetime.now(), message))
+
+
+def log_if(message, config_key):
+    if config['log'][config_key]:
+        log(message)
+
 def send_mail(camera_description):
     try:
+        log_if("attempting to send notify mail about {}".format(camera_description), 'mail')
         import smtplib
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
@@ -40,7 +65,10 @@ def send_mail(camera_description):
         text = msg.as_string()
         server.sendmail(config['email']['from_address'], config['email']['to_address'], text)
         server.quit()
+        log_if("mail successfully sent about {}".format(camera_description), 'mail')
     except Exception as e:
+        log_if("failed to send email about {}".format(camera_description), 'mail')
+        log_if(e, 'mail')
         return False
     return True
 
@@ -104,14 +132,14 @@ def get_video_capture(url):
 
 def detect_motion(config):
     cameras[config['camera']['name']] = None
-    url = 'http://%s:%s@%s:%s/%s' % (config['camera']['user'],
-                                     config['camera']['password'],
-                                     config['camera']['host'],
-                                     config['camera']['port'],
-                                     config['camera']['path'])
+    url = config['camera']['url'] or 'http://%s:%s@%s:%s/%s' % (config['camera']['user'],
+                                                                config['camera']['password'],
+                                                                config['camera']['host'],
+                                                                config['camera']['port'],
+                                                                config['camera']['path'])
 
     # url = './video.mjpg'
-    print("cam {} detecting motion on url {}".format(config['camera']['name'], url))
+    log("cam {} detecting motion on url {}".format(config['camera']['name'], url))
 
     cap = get_video_capture(url)
 
@@ -119,6 +147,8 @@ def detect_motion(config):
 
     last_motion = datetime.datetime.now()
     last_motionless = datetime.datetime.now()
+    motion_since = 0
+    motionless_since = 0
 
     notified = True
 
@@ -147,9 +177,14 @@ def detect_motion(config):
             reference_frame = gray
             continue
 
-        motion_detected, frame, threshold, frame_delta = get_motion(frame, reference_frame, config['detection']['min_area'])
+        motion_detected, frame, threshold, frame_delta = get_motion(frame, reference_frame,
+                                                                    config['detection']['min_area'])
 
         if motion_detected:
+            if motionless_since != 0:
+                log_if("cam {}: motion detected after {} seconds of no motion".format(config['camera']['name'],
+                                                                                   motionless_since), 'motion_changes')
+                motionless_since = 0
             motion_since = datetime.datetime.now() - last_motionless
 
             text = "Motion detected for {:.2f} seconds".format(motion_since.total_seconds())
@@ -161,23 +196,29 @@ def detect_motion(config):
                 reference_frame = gray
 
         else:
+            if motion_since != 0:
+                log_if("cam {}: no motion detected after {} seconds of motion".format(config['camera']['name'],
+                                                                                   motion_since), 'motion_changes')
+                motion_since = 0
             motionless_since = datetime.datetime.now() - last_motion
             text = "No Motion detected for {:.2f} seconds".format(motionless_since.total_seconds())
 
-
             # notify
-            if motionless_since > datetime.timedelta(seconds=config['detection']['notify_seconds']) and not notified:
-                print('notify cam {} @ {}'.format(config['camera']['name'], datetime.datetime.now()))
-                if config['email']['enabled']:
-                    send_mail(config['camera']['description'])
-                notified = True
-
+            if motionless_since > datetime.timedelta(seconds=config['detection']['notify_seconds']):
+                if not notified:
+                    log_if('notify cam {}'.format(config['camera']['name']), 'notify')
+                    if config['email']['enabled']:
+                        send_mail(config['camera']['description'])
+                    notified = True
+                else:
+                    log_if('no notify (already notified) cam {}'.format(config['camera']['name']), 'already_notified')
             last_motionless = datetime.datetime.now()
 
         frame = add_text(frame, text)
 
         cameras[config['camera']['name']] = frame
-        print('{}: cam {} got a frame'.format(datetime.datetime.now(), config['camera']['name']))
+        if config['log']['frames_recieved']:
+            log('cam {} got a frame'.format(config['camera']['name']))
 
         display(config, frame, threshold, frame_delta)
 
@@ -224,15 +265,12 @@ threads = []
 for camera_idx in range(len(config['cameras'])):
     cam_config = config.copy()
     cam_config['camera'] = cam_config['cameras'][camera_idx]
-    print("starting thread for cam {}".format(cam_config['camera']['name']))
+    log("starting thread for cam {}".format(cam_config['camera']['name']))
     process = Thread(target=detect_motion, args=[cam_config])
     process.start()
     threads.append(process)
 
-
 app.run(host=config['server']['listen_address'], port=config['server']['port'], debug=False)
-
 
 for process in threads:
     process.join()
-
