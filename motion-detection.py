@@ -30,7 +30,7 @@ def synchronized(func):
     return synced_func
 
 
-logfile = open('motion-detection.log', 'a')
+logfile = open('motion-detection.log', 'a+')
 
 
 @synchronized
@@ -132,13 +132,15 @@ def get_video_capture(url):
 
 def detect_motion(config):
     cameras[config['camera']['name']] = None
-    url = config['camera']['url'] or 'http://%s:%s@%s:%s/%s' % (config['camera']['user'],
-                                                                config['camera']['password'],
-                                                                config['camera']['host'],
-                                                                config['camera']['port'],
-                                                                config['camera']['path'])
+    if 'url' in config['camera']:
+        url = config['camera']['url']
+    else:
+        url = 'http://%s:%s@%s:%s/%s' % (config['camera']['user'],
+                                         config['camera']['password'],
+                                         config['camera']['host'],
+                                         config['camera']['port'],
+                                         config['camera']['path'])
 
-    # url = './video.mjpg'
     log("cam {} detecting motion on url {}".format(config['camera']['name'], url))
 
     cap = get_video_capture(url)
