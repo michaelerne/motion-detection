@@ -1,1 +1,1 @@
-pyinstaller --onefile --add-data "venv/Lib/site-packages/cv2/opencv_ffmpeg343.dll;./" motion-detection.py
+pyinstaller --onefile --add-data "venv/Lib/site-packages/cv2/opencv_ffmpeg343.dll;./" --icon icon.ico motion-detection.py
