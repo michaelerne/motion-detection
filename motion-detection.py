@@ -2,12 +2,16 @@ import cv2
 import imutils
 import datetime
 import yaml
-from flask import Flask, Response
+from flask import Flask, Response, send_file
+from flask_httpauth import HTTPBasicAuth
+import copy
 
 from threading import Thread, Lock
 import time
 
+
 app = Flask(__name__)
+auth = HTTPBasicAuth()
 
 cameras = {}
 config = {}
@@ -18,6 +22,13 @@ with open("config.yaml", 'r') as config_file:
     except yaml.YAMLError as e:
         print(e)
         exit(1)
+
+
+@auth.get_password
+def get_pw(username):
+    if username in config['auth']:
+        return config['auth'][username]
+    return None
 
 
 def synchronized(func):
@@ -44,7 +55,8 @@ def log_if(message, config_key):
     if config['log'][config_key]:
         log(message)
 
-def send_mail(camera_description):
+
+def send_mail(camera_description, motion_since, threshold):
     try:
         log_if("attempting to send notify mail about {}".format(camera_description), 'mail')
         import smtplib
@@ -57,6 +69,8 @@ def send_mail(camera_description):
         msg['Subject'] = config['email']['subject'].replace('%CAMERA%', camera_description)
 
         body = config['email']['body'].replace('%CAMERA%', camera_description)
+        body = body.replace('%MOTION_SINCE%', str(motion_since))
+        body = body.replace('%THRESHOLD%', str(threshold))
         msg.attach(MIMEText(body, 'plain'))
 
         server = smtplib.SMTP(config['email']['smtp']['server'], config['email']['smtp']['port'])
@@ -126,38 +140,77 @@ def display(config, frame, threshold, frame_delta):
         exit(0)
 
 
+def td_format(td_object):
+    seconds = int(td_object.total_seconds())
+    periods = [
+        ('year',        60*60*24*365),
+        ('month',       60*60*24*30),
+        ('day',         60*60*24),
+        ('hour',        60*60),
+        ('minute',      60),
+        ('second',      1)
+    ]
+
+    strings = []
+    for period_name, period_seconds in periods:
+        if seconds >= period_seconds:
+            period_value , seconds = divmod(seconds, period_seconds)
+            has_s = 's' if period_value > 1 else ''
+            strings.append("%s %s%s" % (period_value, period_name, has_s))
+
+    return ", ".join(strings)
+
+
 def get_video_capture(url):
     return cv2.VideoCapture(url)
 
 
 def detect_motion(config):
-    cameras[config['camera']['name']] = None
-    if 'url' in config['camera']:
-        url = config['camera']['url']
-    else:
-        url = 'http://%s:%s@%s:%s/%s' % (config['camera']['user'],
-                                         config['camera']['password'],
-                                         config['camera']['host'],
-                                         config['camera']['port'],
-                                         config['camera']['path'])
 
-    log("cam {} detecting motion on url {}".format(config['camera']['name'], url))
+    cameras[config['name']] = None
+
+    if 'url' in config:
+        url = config['url']
+    else:
+        url = 'http://%s:%s@%s:%s/%s' % (config['user'],
+                                         config['password'],
+                                         config['host'],
+                                         config['port'],
+                                         config['path'])
+
+    log("cam {} detecting motion on url {}".format(config['name'], url))
 
     cap = get_video_capture(url)
 
     reference_frame = None
 
-    last_motion = datetime.datetime.now()
-    last_motionless = datetime.datetime.now()
-    motion_since = 0
-    motionless_since = 0
+    now = datetime.datetime.now()
+    motion_state = {
+        'motion': {
+            'last': now,
+            'since': datetime.timedelta(0),
+            'last_notification': now
+        },
+        'motionless': {
+            'last': now,
+            'since': datetime.timedelta(0),
+            'last_notification': now
+        }
+    }
 
     notified = True
 
     frame_counter = 0
+
+    threshold = None
+    frame_delta = None
+
+    update_reference_delta = datetime.timedelta(seconds=config['detection']['update_reference_seconds'])
+    notify_delta = datetime.timedelta(seconds=config['detection']['notify_seconds'])
+
     while True:
-        text = ""
         ret, frame = cap.read()
+
         if not ret:
             cap = get_video_capture(url)
             continue
@@ -168,73 +221,122 @@ def detect_motion(config):
         else:
             frame_counter = config['detection']['frame_skip']
 
-        frame = cv2.resize(frame, (640, 480))
+        frame = cv2.resize(frame, (config['resize']['x'], config['resize']['y']))
 
         gray = get_grayscale(frame)
 
         if gray is None:
-            return
+            continue
 
         if reference_frame is None:
             reference_frame = gray
             continue
 
-        motion_detected, frame, threshold, frame_delta = get_motion(frame, reference_frame,
-                                                                    config['detection']['min_area'])
+        if config['detection']['enabled']:
+            motion_detected, frame, threshold, frame_delta = get_motion(frame, reference_frame,
+                                                                        config['detection']['min_area'])
 
-        if motion_detected:
-            if motionless_since != 0:
-                log_if("cam {}: motion detected after {} seconds of no motion".format(config['camera']['name'],
-                                                                                   motionless_since), 'motion_changes')
-                motionless_since = 0
-            motion_since = datetime.datetime.now() - last_motionless
+            if motion_detected:
+                if motion_state['motionless']['since'] != datetime.timedelta(0):
+                    log_if("cam {}: motion detected after {} seconds of no motion".format(config['name'], motion_state['motionless']['since']),
+                           'motion_changes')
+                    motion_state['motionless']['since'] = datetime.timedelta(0)
+                motion_state['motion']['since'] = datetime.datetime.now() - motion_state['motionless']['last']
 
-            text = "Motion detected for {:.2f} seconds".format(motion_since.total_seconds())
-            notified = False
-            last_motion = datetime.datetime.now()
+                text = "Motion detected for {:.2f} seconds".format(motion_state['motion']['since'].total_seconds())
+                notified = False
+                motion_state['motion']['last'] = datetime.datetime.now()
 
-            # update reference frame
-            if motion_since > datetime.timedelta(seconds=config['detection']['update_reference_seconds']):
-                reference_frame = gray
+                # update reference frame
+                if motion_state['motion']['since'] > update_reference_delta:
+                    reference_frame = gray
 
-        else:
-            if motion_since != 0:
-                log_if("cam {}: no motion detected after {} seconds of motion".format(config['camera']['name'],
-                                                                                   motion_since), 'motion_changes')
-                motion_since = 0
-            motionless_since = datetime.datetime.now() - last_motion
-            text = "No Motion detected for {:.2f} seconds".format(motionless_since.total_seconds())
+            else:
+                if motion_state['motion']['since'] != datetime.timedelta(0):
+                    log_if("cam {}: no motion detected after {} seconds of motion".format(config['name'], motion_state['motion']['since']), 'motion_changes')
+                    motion_state['motion']['since'] = datetime.timedelta(0)
+                motion_state['motionless']['since'] = datetime.datetime.now() - motion_state['motion']['last']
+                text = "No Motion detected for {:.2f} seconds".format(motion_state['motionless']['since'].total_seconds())
 
-            # notify
-            if motionless_since > datetime.timedelta(seconds=config['detection']['notify_seconds']):
-                if not notified:
-                    log_if('notify cam {}'.format(config['camera']['name']), 'notify')
-                    if config['email']['enabled']:
-                        send_mail(config['camera']['description'])
-                    notified = True
-                else:
-                    log_if('no notify (already notified) cam {}'.format(config['camera']['name']), 'already_notified')
-            last_motionless = datetime.datetime.now()
+                # notify
+                if motion_state['motionless']['since'] > notify_delta:
+                    if not notified:
+                        log_if('notify cam {}'.format(config['name']), 'notify')
+                        if config['email']['enabled']:
+                            send_mail(config['description'], td_format(motion_state['motion']['since']), config['detection']['notify_seconds'])
+                        notified = True
+                    else:
+                        log_if('no notify (already notified) cam {}'.format(config['name']), 'already_notified')
+                motion_state['motionless']['last'] = datetime.datetime.now()
 
-        frame = add_text(frame, text)
+            frame = add_text(frame, text)
 
-        cameras[config['camera']['name']] = frame
+        cameras[config['name']] = frame
         if config['log']['frames_recieved']:
-            log('cam {} got a frame'.format(config['camera']['name']))
+            log('cam {} got a frame'.format(config['name']))
 
         display(config, frame, threshold, frame_delta)
 
 
 @app.route('/video_feed/<camera>')
+@auth.login_required
 def video_feed(camera):
-    return Response(get_frame(camera),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
-
+    if has_frame(camera):
+        return Response(get_frame(camera),
+                        mimetype='multipart/x-mixed-replace; boundary=frame')
+    else:
+        return send_file('./img/offline.jpg', mimetype='image/jpeg', cache_timeout=-1)
 
 @app.route('/')
+@auth.login_required
 def index():
     page = '''
 <html>
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    font-family: Arial;
+}
+
+.header {
+    text-align: center;
+    padding: 32px;
+}
+
+.row {
+    display: -ms-flexbox; /* IE10 */
+    display: flex;
+    -ms-flex-wrap: wrap; /* IE10 */
+    flex-wrap: wrap;
+    padding: 0 4px;
+}
+
+.column {
+    -ms-flex: 50%; /* IE10 */
+    flex: 50%;
+    max-width: 50%;
+    padding: 0 4px;
+}
+
+.column img {
+    margin-top: 8px;
+    vertical-align: middle;
+}
+
+
+@media screen and (max-width: 1280px) {
+    .column {
+        -ms-flex: 100%;
+        flex: 100%;
+        max-width: 100%;
+    }
+}
+</style>
+
   <head>
     <title>Motion Detection</title>
   </head>
@@ -242,15 +344,30 @@ def index():
     <h1>Motion Detection</h1>
 '''
 
-    for camera in config['cameras']:
-        page += '<h2>{}</h2><br \><img src="/video_feed/{}">'.format(camera['description'], camera['name'])
+    for idx, camera in enumerate(config['cameras']):
+        if idx % 2 == 0:
+            page += '<div class="row">'
+
+        page += '<div class="column">'
+
+        page += '<h2>{}</h2><br \><img src="/video_feed/{}" style="width:100%">'.format(camera['description'], camera['name'])
+
+        page += '</div>'
+
+        if idx % 2 == 1:
+            page += '</div>'
 
     page += '''
+    
   </body>
 </html>
     '''
 
     return page
+
+
+def has_frame(camera):
+    return camera not in cameras or cameras[camera] is not None
 
 
 def get_frame(camera):
@@ -262,12 +379,30 @@ def get_frame(camera):
         time.sleep(config['server']['frame_interval_seconds'])
 
 
+def merge(a, b, path=None):
+    if path is None: path = []
+    for key in b:
+        if key in a:
+            if isinstance(a[key], dict) and isinstance(b[key], dict):
+                merge(a[key], b[key], path + [str(key)])
+            elif a[key] == b[key]:
+                pass
+            else:
+                a[key] = b[key]
+        else:
+            a[key] = b[key]
+    return a
+
+
 threads = []
 
 for camera_idx in range(len(config['cameras'])):
-    cam_config = config.copy()
-    cam_config['camera'] = cam_config['cameras'][camera_idx]
-    log("starting thread for cam {}".format(cam_config['camera']['name']))
+    cam_config = copy.deepcopy(config)
+    merge(cam_config, config['cameras'][camera_idx])
+    del cam_config['cameras']
+
+    log("starting thread for cam {}".format(cam_config['name']))
+
     process = Thread(target=detect_motion, args=[cam_config])
     process.start()
     threads.append(process)

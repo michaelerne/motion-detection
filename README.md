@@ -4,6 +4,14 @@ hacky python app that scrapes one or many ip cams via m-jpg, performs configurab
 
 USE AT YOUR OWN RISK
 
+## dependencies
+
+### Windows 10
+Windows 10 should have all required dependencies. Please open an issue if you discover otherwise.
+
+### Windows server 2012
+Follow these instructions: https://stackoverflow.com/questions/52121143/opencv-with-python-3-6-4-on-windows-server-2012-r2-x64-import-cv2-dll-not-found
+
 ## run
 start `motion-detection.exe`, be sure to configure it first (see below). Start via `cmd.exe` for log output.
 
@@ -13,6 +21,8 @@ webpage is by default located at (http://localhost:8080)
 requires a config.yaml file next to the .exe with contents like:
 
 ```yaml
+auth:
+  admin: ThisIsNotVerySecure
 log:
   frames_recieved: False
   already_notified: True
@@ -28,6 +38,9 @@ cameras:
   path: 'mjpg/video.mjpg'
   user: ''
   password: ''
+  detection:
+    enabled: False
+
 - name: cam_2
   description: Camera 2
   host: '192.168.1.50'
@@ -35,11 +48,16 @@ cameras:
   path: 'mjpg/video.mjpg'
   user: ''
   password: ''
+  email:
+    enabled: False
 detection:
   min_area: 10
   update_reference_seconds: 3
   notify_seconds: 300
   frame_skip: 5
+resize:
+  x: 640
+  y: 480
 email:
   enabled: False
   smtp:
@@ -50,6 +68,8 @@ email:
   subject: 'no motion on camera %CAMERA%'
   body: |
     no motion detected on camera %CAMERA%
+
+    after running for %MOTION_SINCE% seconds, the camera reported no motion for %THRESHOLD%.
 
     please verify!
   from_address: ''
